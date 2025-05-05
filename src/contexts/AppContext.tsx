@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, Message, Room } from '@/types';
 import { toast } from '@/components/ui/use-toast';
+import { getUserProfile, updateUserStatus, signOut } from '@/services/supabaseService';
+import { supabase } from '@/lib/supabase';
 
 interface AppContextType {
   sidebarOpen: boolean;
@@ -21,6 +23,7 @@ interface AppContextType {
   soundEnabled: boolean;
   toggleSound: () => void;
   addReaction: (messageId: string, emoji: string) => void;
+  logout: () => void;
 }
 
 const defaultAppContext: AppContextType = {
@@ -41,14 +44,15 @@ const defaultAppContext: AppContextType = {
   toggleNotifications: () => {},
   soundEnabled: true,
   toggleSound: () => {},
-  addReaction: () => {}
+  addReaction: () => {},
+  logout: () => {}
 };
 
 const AppContext = createContext<AppContextType>(defaultAppContext);
 
 export const useAppContext = () => useContext(AppContext);
 
-// Mock data
+// Mock data (to be removed when using real database)
 const mockUsers: User[] = [
   { id: '1', name: 'John Doe', status: 'online', avatar: 'https://i.pravatar.cc/150?img=1' },
   { id: '2', name: 'Jane Smith', status: 'offline', avatar: 'https://i.pravatar.cc/150?img=5' },
@@ -89,13 +93,62 @@ const mockMessages: Message[] = [
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [currentUser, setCurrentUser] = useState<User | null>(mockUsers[0]); // Auto-login for demo
-  const [users, setUsers] = useState<User[]>(mockUsers);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
   const [rooms, setRooms] = useState<Room[]>(mockRooms);
   const [currentRoom, setCurrentRoom] = useState<Room | null>(mockRooms[0]);
   const [messages, setMessages] = useState<Message[]>(mockMessages);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
+
+  // Authentication effect
+  useEffect(() => {
+    const initializeAuth = async () => {
+      // Get current session
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session?.user) {
+        await loadUserProfile(session.user.id);
+      }
+    };
+
+    initializeAuth();
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session?.user) {
+        await loadUserProfile(session.user.id);
+      } else if (event === 'SIGNED_OUT') {
+        setCurrentUser(null);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const loadUserProfile = async (userId: string) => {
+    try {
+      const profile = await getUserProfile(userId);
+      setCurrentUser(profile);
+      
+      // Mark user as online
+      await updateUserStatus(userId, 'online');
+      
+      // Set up status updates
+      const statusInterval = setInterval(() => {
+        updateUserStatus(userId, 'online');
+      }, 60000); // Update every minute
+
+      return () => clearInterval(statusInterval);
+    } catch (error) {
+      console.error('Error loading user profile:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load user profile',
+        variant: 'destructive'
+      });
+    }
+  };
 
   const toggleSidebar = () => {
     setSidebarOpen(prev => !prev);
@@ -132,17 +185,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setMessages(prev => 
       prev.map(message => {
         if (message.id === messageId) {
-          // Initialize reactions object if it doesn't exist
           const reactions = message.reactions || {};
-          
-          // Initialize emoji array if it doesn't exist
           const emojiUsers = reactions[emoji] || [];
-          
-          // Check if user already reacted with this emoji
           const userIndex = emojiUsers.indexOf(currentUser.id);
           
           if (userIndex >= 0) {
-            // Remove user's reaction if they already reacted with this emoji
             const newEmojiUsers = [...emojiUsers];
             newEmojiUsers.splice(userIndex, 1);
             
@@ -154,7 +201,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               }
             };
           } else {
-            // Add user's reaction
             return {
               ...message,
               reactions: {
@@ -213,6 +259,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const logout = async () => {
+    if (currentUser) {
+      // Update user status to offline before signing out
+      await updateUserStatus(currentUser.id, 'offline');
+    }
+    
+    try {
+      await signOut();
+      setCurrentUser(null);
+      setCurrentRoom(null);
+      setMessages([]);
+      setRooms(mockRooms);
+    } catch (error) {
+      console.error('Error signing out:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to sign out',
+        variant: 'destructive'
+      });
+    }
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -233,7 +301,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleNotifications,
         soundEnabled,
         toggleSound,
-        addReaction
+        addReaction,
+        logout
       }}
     >
       {children}
